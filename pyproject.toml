@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentrace-ai"
+version = "0.1.0"
+description = "Lightweight OpenTelemetry-native tracing for LLM and AI agent applications"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Karthik Manyam" },
+]
+keywords = ["opentelemetry", "tracing", "llm", "agents", "observability", "ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Monitoring",
+]
+dependencies = [
+    "opentelemetry-api>=1.20,<2",
+    "opentelemetry-sdk>=1.20,<2",
+]
+
+[project.urls]
+Homepage = "https://github.com/manyamkarthik/agentrace-ai"
+Repository = "https://github.com/manyamkarthik/agentrace-ai"
+Issues = "https://github.com/manyamkarthik/agentrace-ai/issues"
+
+[project.optional-dependencies]
+otlp = ["opentelemetry-exporter-otlp>=1.20,<2"]
+openai = ["openai>=1.0"]
+anthropic = ["anthropic>=0.20"]
+langchain = ["langchain-core>=0.1"]
+all = ["agentrace-ai[otlp,openai,anthropic,langchain]"]
+dev = ["pytest", "pytest-asyncio", "ruff"]
+
+[tool.setuptools.packages.find]
+include = ["agentrace*"]
