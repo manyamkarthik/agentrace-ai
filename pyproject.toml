@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentrace-ai"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lightweight OpenTelemetry-native tracing for LLM and AI agent applications"
 readme = "README.md"
 license = "MIT"

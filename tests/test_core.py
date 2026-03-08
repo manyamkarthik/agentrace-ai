@@ -314,3 +314,40 @@ class TestNestedSpans:
         assert len(spans) == 2
         kinds = {s.attributes[attrs.AGENTRACE_SPAN_KIND] for s in spans}
         assert kinds == {"agent", "tool"}
+
+
+class TestInitConfig:
+    def test_init_with_custom_exporter_uses_simple_processor(self):
+        """Bug 1 fix: custom SpanExporter instances should use SimpleSpanProcessor by default."""
+        from agentrace.config import _resolve_exporter
+        exporter = InMemorySpanExporter()
+        processor = _resolve_exporter(exporter, None, None, batch=False)
+        assert isinstance(processor, SimpleSpanProcessor)
+
+    def test_init_with_batch_true_uses_batch_processor(self):
+        from agentrace.config import _resolve_exporter
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        exporter = InMemorySpanExporter()
+        processor = _resolve_exporter(exporter, None, None, batch=True)
+        assert isinstance(processor, BatchSpanProcessor)
+        processor.shutdown()
+
+    def test_init_with_provider(self, setup_tracer):
+        """Bug 3 fix: accept a pre-built TracerProvider."""
+        from agentrace.config import get_config
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+
+        agentrace.init(
+            service_name="test-provider",
+            provider=provider,
+            capture_prompts=False,
+        )
+
+        config = get_config()
+        assert config.service_name == "test-provider"
+        assert config.capture_prompts is False
+        assert config.initialized is True
+
+        provider.shutdown()

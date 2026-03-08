@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from opentelemetry import trace
@@ -43,13 +43,15 @@ def init(
     default_session_id: str | None = None,
     default_user_id: str | None = None,
     resource_attributes: dict[str, str] | None = None,
+    batch: bool = False,
+    provider: TracerProvider | None = None,
 ) -> None:
     """Initialize agentrace. Call once at application startup.
 
     Args:
         service_name: Name of your service/agent.
         exporters: List of exporter names ("console", "otlp") or SpanExporter instances.
-                   Defaults to ["console"].
+                   Defaults to ["console"]. Ignored if `provider` is given.
         otlp_endpoint: OTLP collector endpoint (for "otlp" exporter).
         otlp_headers: Headers for OTLP exporter (e.g. auth tokens).
         capture_prompts: Whether to record prompt/completion text on LLM spans.
@@ -57,27 +59,35 @@ def init(
         default_session_id: Default session ID for all spans.
         default_user_id: Default user ID for all spans.
         resource_attributes: Additional OTel resource attributes.
+        batch: If True, use BatchSpanProcessor (better for high-volume production).
+               If False (default), use SimpleSpanProcessor (spans flush immediately).
+        provider: Pre-built TracerProvider. If given, exporters/resource_attributes
+                  are ignored — use this when you need full control over the provider.
     """
     global _config
 
-    if exporters is None:
-        exporters = ["console"]
+    if provider is not None:
+        # User brought their own provider — just use it
+        trace.set_tracer_provider(provider)
+    else:
+        if exporters is None:
+            exporters = ["console"]
 
-    # Build resource
-    attrs: dict[str, Any] = {"service.name": service_name}
-    if resource_attributes:
-        attrs.update(resource_attributes)
-    resource = Resource.create(attrs)
+        # Build resource
+        attrs: dict[str, Any] = {"service.name": service_name}
+        if resource_attributes:
+            attrs.update(resource_attributes)
+        resource = Resource.create(attrs)
 
-    # Create provider
-    provider = TracerProvider(resource=resource)
+        # Create provider
+        provider = TracerProvider(resource=resource)
 
-    # Add exporters
-    for exp in exporters:
-        processor = _resolve_exporter(exp, otlp_endpoint, otlp_headers)
-        provider.add_span_processor(processor)
+        # Add exporters
+        for exp in exporters:
+            processor = _resolve_exporter(exp, otlp_endpoint, otlp_headers, batch)
+            provider.add_span_processor(processor)
 
-    trace.set_tracer_provider(provider)
+        trace.set_tracer_provider(provider)
 
     # Store config
     _config = _Config(
@@ -102,10 +112,13 @@ def _resolve_exporter(
     exporter: str | SpanExporter,
     otlp_endpoint: str | None,
     otlp_headers: dict[str, str] | None,
+    batch: bool,
 ) -> SimpleSpanProcessor | BatchSpanProcessor:
     """Resolve an exporter string or instance into a span processor."""
+    processor_cls = BatchSpanProcessor if batch else SimpleSpanProcessor
+
     if isinstance(exporter, SpanExporter):
-        return BatchSpanProcessor(exporter)
+        return processor_cls(exporter)
 
     if exporter == "console":
         from agentrace.exporters.console import AgentTraceConsoleExporter
