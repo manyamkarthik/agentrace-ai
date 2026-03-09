@@ -67,6 +67,8 @@ def observe(
                     span.set_status(StatusCode.ERROR, str(exc))
                     span.record_exception(exc)
                     raise
+                finally:
+                    _reattach_context(span)
 
         @functools.wraps(fn)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -91,6 +93,8 @@ def observe(
                     span.set_status(StatusCode.ERROR, str(exc))
                     span.record_exception(exc)
                     raise
+                finally:
+                    _reattach_context(span)
 
         if inspect.iscoroutinefunction(fn):
             return async_wrapper  # type: ignore[return-value]
@@ -287,6 +291,18 @@ def trace_retrieval(
 ) -> Callable[[F], F]:
     """Decorator for retrieval operations (vector search, document fetch, etc.)."""
     return observe(name=name, kind="retrieval")
+
+
+def _reattach_context(span) -> None:
+    """Re-check contextvars for session/user set during function execution."""
+    from agentrace.session import get_session, get_user
+
+    late_session = get_session()
+    late_user = get_user()
+    if late_session:
+        span.set_attribute(attrs.AGENTRACE_SESSION_ID, late_session)
+    if late_user:
+        span.set_attribute(attrs.AGENTRACE_USER_ID, late_user)
 
 
 def _record_input(

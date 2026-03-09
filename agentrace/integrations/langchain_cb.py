@@ -18,6 +18,16 @@ except ImportError:
     BaseCallbackHandler = object  # type: ignore[misc, assignment]
 
 
+def _safe_name(serialized: dict[str, Any] | None, key: str, fallback: str) -> str:
+    """Safely extract a name from serialized dict. Handles None and missing keys."""
+    if not serialized:
+        return fallback
+    if key == "id":
+        ids = serialized.get("id")
+        return ids[-1] if ids else fallback
+    return serialized.get(key, fallback)
+
+
 class AgentraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
     """LangChain callback handler that creates OTel spans for each step.
 
@@ -43,13 +53,13 @@ class AgentraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
 
     def on_llm_start(
         self,
-        serialized: dict[str, Any],
+        serialized: dict[str, Any] | None,
         prompts: list[str],
         *,
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
-        name = serialized.get("id", ["unknown"])[-1] if serialized.get("id") else "llm"
+        name = _safe_name(serialized, "id", "llm")
         span = self._start_span(run_id, f"langchain.llm.{name}", "llm")
         model = kwargs.get("invocation_params", {}).get("model_name", "")
         if model:
@@ -74,13 +84,13 @@ class AgentraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
 
     def on_chain_start(
         self,
-        serialized: dict[str, Any],
+        serialized: dict[str, Any] | None,
         inputs: dict[str, Any],
         *,
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
-        name = serialized.get("id", ["unknown"])[-1] if serialized.get("id") else "chain"
+        name = _safe_name(serialized, "id", "chain")
         span = self._start_span(run_id, f"langchain.chain.{name}", "chain")
         span.set_attribute(attrs.AGENTRACE_INPUT, safe_serialize(inputs))
 
@@ -99,13 +109,13 @@ class AgentraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
 
     def on_tool_start(
         self,
-        serialized: dict[str, Any],
+        serialized: dict[str, Any] | None,
         input_str: str,
         *,
         run_id: UUID,
         **kwargs: Any,
     ) -> None:
-        name = serialized.get("name", "tool")
+        name = _safe_name(serialized, "name", "tool")
         span = self._start_span(run_id, f"langchain.tool.{name}", "tool")
         span.set_attribute(attrs.AGENTRACE_TOOL_NAME, name)
         span.set_attribute(attrs.AGENTRACE_TOOL_INPUT, safe_serialize(input_str))
@@ -124,7 +134,7 @@ class AgentraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
         self._end_span(run_id)
 
     def on_retriever_start(
-        self, serialized: dict[str, Any], query: str, *, run_id: UUID, **kwargs: Any
+        self, serialized: dict[str, Any] | None, query: str, *, run_id: UUID, **kwargs: Any
     ) -> None:
         span = self._start_span(run_id, "langchain.retriever", "retrieval")
         span.set_attribute(attrs.AGENTRACE_RETRIEVAL_QUERY, query)

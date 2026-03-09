@@ -151,6 +151,12 @@ from agentrace.session import session_context
 set_session("session-abc-123")
 set_user("user-42")
 
+# Also works inside decorated functions — session/user is captured before span ends
+@trace_agent(name="my-agent")
+async def run(user_id, task):
+    set_user(user_id)  # This is correctly attached to the agent span
+    return await do_work(task)
+
 # Or scoped to a block
 with session_context(session_id="s-123", user_id="u-42"):
     run_agent(...)  # All spans inside get session/user attributes
@@ -329,6 +335,8 @@ agentrace.init(
     default_session_id=None,              # Default session ID for all spans
     default_user_id=None,                 # Default user ID for all spans
     resource_attributes=None,             # Extra OTel resource attributes
+    batch=False,                          # True = BatchSpanProcessor, False = SimpleSpanProcessor
+    provider=None,                        # Bring your own pre-built TracerProvider
 )
 ```
 

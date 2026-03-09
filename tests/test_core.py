@@ -351,3 +351,91 @@ class TestInitConfig:
         assert config.initialized is True
 
         provider.shutdown()
+
+
+class TestCallbackHandlerNoneSerialzied:
+    """Bug: on_chain_start crashes when LangGraph passes serialized=None."""
+
+    def test_on_chain_start_with_none_serialized(self, setup_tracer):
+        from uuid import uuid4
+        from agentrace.integrations.langchain_cb import AgentraceCallbackHandler
+
+        handler = AgentraceCallbackHandler()
+        run_id = uuid4()
+
+        # Should NOT raise — LangGraph passes None for internal nodes
+        handler.on_chain_start(None, {"input": "test"}, run_id=run_id)
+        handler.on_chain_end({"output": "done"}, run_id=run_id)
+
+    def test_on_chain_start_with_empty_serialized(self, setup_tracer):
+        from uuid import uuid4
+        from agentrace.integrations.langchain_cb import AgentraceCallbackHandler
+
+        handler = AgentraceCallbackHandler()
+        run_id = uuid4()
+
+        # Empty dict — should also not crash
+        handler.on_chain_start({}, {"input": "test"}, run_id=run_id)
+        handler.on_chain_end({"output": "done"}, run_id=run_id)
+
+    def test_on_llm_start_with_none_serialized(self, setup_tracer):
+        from uuid import uuid4
+        from agentrace.integrations.langchain_cb import AgentraceCallbackHandler
+
+        handler = AgentraceCallbackHandler()
+        run_id = uuid4()
+
+        handler.on_llm_start(None, ["hello"], run_id=run_id)
+        handler.on_llm_end(MagicMock(llm_output=None), run_id=run_id)
+
+    def test_on_tool_start_with_none_serialized(self, setup_tracer):
+        from uuid import uuid4
+        from agentrace.integrations.langchain_cb import AgentraceCallbackHandler
+
+        handler = AgentraceCallbackHandler()
+        run_id = uuid4()
+
+        handler.on_tool_start(None, "input", run_id=run_id)
+        handler.on_tool_end("output", run_id=run_id)
+
+
+class TestSetUserInsideDecorator:
+    """Bug: set_user() called inside @trace_agent body doesn't appear on span."""
+
+    def test_set_user_inside_observe(self, setup_tracer):
+        exporter = setup_tracer
+
+        @observe()
+        def my_func():
+            set_user("late-user-123")
+            return "ok"
+
+        my_func()
+        span = exporter.get_finished_spans()[0]
+        # User set inside the function body MUST appear on the span
+        assert span.attributes.get(attrs.AGENTRACE_USER_ID) == "late-user-123"
+
+    def test_set_session_inside_observe(self, setup_tracer):
+        exporter = setup_tracer
+
+        @observe()
+        def my_func():
+            set_session("late-session-456")
+            return "ok"
+
+        my_func()
+        span = exporter.get_finished_spans()[0]
+        assert span.attributes.get(attrs.AGENTRACE_SESSION_ID) == "late-session-456"
+
+    @pytest.mark.asyncio
+    async def test_set_user_inside_async_observe(self, setup_tracer):
+        exporter = setup_tracer
+
+        @observe(kind="agent")
+        async def agent_fn():
+            set_user("async-user-789")
+            return "done"
+
+        await agent_fn()
+        span = exporter.get_finished_spans()[0]
+        assert span.attributes.get(attrs.AGENTRACE_USER_ID) == "async-user-789"
