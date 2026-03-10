@@ -65,7 +65,6 @@ def observe(
                     return result
                 except Exception as exc:
                     span.set_status(StatusCode.ERROR, str(exc))
-                    span.record_exception(exc)
                     raise
                 finally:
                     _reattach_context(span)
@@ -91,7 +90,6 @@ def observe(
                     return result
                 except Exception as exc:
                     span.set_status(StatusCode.ERROR, str(exc))
-                    span.record_exception(exc)
                     raise
                 finally:
                     _reattach_context(span)
@@ -174,7 +172,6 @@ async def _run_llm_span_async(fn, span, model, should_capture, args, kwargs):
             return result
         except Exception as exc:
             span.set_status(StatusCode.ERROR, str(exc))
-            span.record_exception(exc)
             raise
 
 
@@ -186,7 +183,6 @@ def _run_llm_span_sync(fn, span, model, should_capture, args, kwargs):
             return result
         except Exception as exc:
             span.set_status(StatusCode.ERROR, str(exc))
-            span.record_exception(exc)
             raise
 
 
@@ -245,8 +241,9 @@ def trace_tool(
                     return result
                 except Exception as exc:
                     span.set_status(StatusCode.ERROR, str(exc))
-                    span.record_exception(exc)
                     raise
+                finally:
+                    _reattach_context(span)
 
         @functools.wraps(fn)
         def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -262,8 +259,9 @@ def trace_tool(
                     return result
                 except Exception as exc:
                     span.set_status(StatusCode.ERROR, str(exc))
-                    span.record_exception(exc)
                     raise
+                finally:
+                    _reattach_context(span)
 
         if inspect.iscoroutinefunction(fn):
             return async_wrapper  # type: ignore[return-value]
@@ -289,8 +287,61 @@ def trace_chain(
 def trace_retrieval(
     name: str | None = None,
 ) -> Callable[[F], F]:
-    """Decorator for retrieval operations (vector search, document fetch, etc.)."""
-    return observe(name=name, kind="retrieval")
+    """Decorator for retrieval operations (vector search, document fetch, etc.).
+
+    Auto-sets agentrace.retrieval.query from the first argument and
+    agentrace.retrieval.num_documents from len(result) if result is a list.
+    """
+
+    def decorator(fn: F) -> F:
+        span_name = name or fn.__name__
+
+        @functools.wraps(fn)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            tracer = get_tracer()
+            span = tracer.start_span(span_name, kind="retrieval")
+            with use_span(span, end_on_exit=True, record_exception=True, set_status_on_exception=True):
+                _record_input(span, fn, args, kwargs)
+                # Set retrieval query from first positional arg
+                if args:
+                    span.set_attribute(attrs.AGENTRACE_RETRIEVAL_QUERY, str(args[0]))
+                try:
+                    result = await fn(*args, **kwargs)
+                    span.set_attribute(attrs.AGENTRACE_OUTPUT, safe_serialize(result))
+                    if isinstance(result, (list, tuple)):
+                        span.set_attribute(attrs.AGENTRACE_RETRIEVAL_NUM_DOCS, len(result))
+                    return result
+                except Exception as exc:
+                    span.set_status(StatusCode.ERROR, str(exc))
+                    raise
+                finally:
+                    _reattach_context(span)
+
+        @functools.wraps(fn)
+        def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+            tracer = get_tracer()
+            span = tracer.start_span(span_name, kind="retrieval")
+            with use_span(span, end_on_exit=True, record_exception=True, set_status_on_exception=True):
+                _record_input(span, fn, args, kwargs)
+                if args:
+                    span.set_attribute(attrs.AGENTRACE_RETRIEVAL_QUERY, str(args[0]))
+                try:
+                    result = fn(*args, **kwargs)
+                    span.set_attribute(attrs.AGENTRACE_OUTPUT, safe_serialize(result))
+                    if isinstance(result, (list, tuple)):
+                        span.set_attribute(attrs.AGENTRACE_RETRIEVAL_NUM_DOCS, len(result))
+                    return result
+                except Exception as exc:
+                    span.set_status(StatusCode.ERROR, str(exc))
+                    raise
+                finally:
+                    _reattach_context(span)
+
+        if inspect.iscoroutinefunction(fn):
+            return async_wrapper  # type: ignore[return-value]
+        return sync_wrapper  # type: ignore[return-value]
+
+    return decorator
 
 
 def _reattach_context(span) -> None:

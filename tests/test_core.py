@@ -58,10 +58,18 @@ trace.set_tracer_provider(_provider)
 
 @pytest.fixture(autouse=True)
 def setup_tracer():
-    """Clear spans between tests and reset tracer cache."""
+    """Clear spans between tests and reset tracer cache + config."""
     _exporter.clear()
     from agentrace.tracer import _tracer
     _tracer._tracer = None
+    # Reset config so init() guard doesn't block tests
+    from agentrace.config import _Config
+    import agentrace.config as _cfg
+    _cfg._config = _Config()
+    # Reset session/user contextvars
+    from agentrace.session import _session_id_var, _user_id_var
+    _session_id_var.set(None)
+    _user_id_var.set(None)
     yield _exporter
 
 
@@ -439,3 +447,260 @@ class TestSetUserInsideDecorator:
         await agent_fn()
         span = exporter.get_finished_spans()[0]
         assert span.attributes.get(attrs.AGENTRACE_USER_ID) == "async-user-789"
+
+
+# ── v0.3.0 Bug Tests ──────────────────────────────────────────────────────
+
+
+class TestBug1_LLMCompletionNeverCaptured:
+    """on_llm_end should capture completion text from response.generations."""
+
+    def test_on_llm_end_captures_completion_text(self, setup_tracer):
+        from uuid import uuid4
+        from agentrace.integrations.langchain_cb import AgentraceCallbackHandler
+
+        exporter = setup_tracer
+        handler = AgentraceCallbackHandler()
+        run_id = uuid4()
+
+        handler.on_llm_start(None, ["hello"], run_id=run_id)
+
+        # Mock LangChain LLMResult with generations
+        response = MagicMock()
+        gen = MagicMock()
+        gen.text = "This is the LLM response"
+        response.generations = [[gen]]
+        response.llm_output = {}
+
+        handler.on_llm_end(response, run_id=run_id)
+
+        spans = exporter.get_finished_spans()
+        assert len(spans) >= 1
+        span = spans[-1]
+        assert "This is the LLM response" in span.attributes.get(attrs.AGENTRACE_COMPLETION, "")
+
+
+class TestBug2_GeminiTokenCounts:
+    """on_llm_end should capture Gemini-style usage_metadata tokens."""
+
+    def test_on_llm_end_gemini_usage_metadata(self, setup_tracer):
+        from uuid import uuid4
+        from agentrace.integrations.langchain_cb import AgentraceCallbackHandler
+
+        exporter = setup_tracer
+        handler = AgentraceCallbackHandler()
+        run_id = uuid4()
+
+        handler.on_llm_start(None, ["hello"], run_id=run_id)
+
+        response = MagicMock()
+        gen = MagicMock()
+        gen.text = "response"
+        response.generations = [[gen]]
+        # Gemini-style: usage_metadata instead of token_usage
+        response.llm_output = {
+            "usage_metadata": {
+                "input_tokens": 42,
+                "output_tokens": 17,
+            }
+        }
+
+        handler.on_llm_end(response, run_id=run_id)
+
+        span = exporter.get_finished_spans()[-1]
+        assert span.attributes.get(attrs.GEN_AI_USAGE_INPUT_TOKENS) == 42
+        assert span.attributes.get(attrs.GEN_AI_USAGE_OUTPUT_TOKENS) == 17
+
+
+class TestBug3_GeminiModelName:
+    """on_llm_start should read 'model' key (Gemini), not just 'model_name' (OpenAI)."""
+
+    def test_on_llm_start_gemini_model_key(self, setup_tracer):
+        from uuid import uuid4
+        from agentrace.integrations.langchain_cb import AgentraceCallbackHandler
+
+        exporter = setup_tracer
+        handler = AgentraceCallbackHandler()
+        run_id = uuid4()
+
+        # Gemini passes model under "model" not "model_name"
+        handler.on_llm_start(
+            None, ["hello"], run_id=run_id,
+            invocation_params={"model": "gemini-2.0-flash"},
+        )
+        handler.on_llm_end(MagicMock(llm_output=None, generations=[]), run_id=run_id)
+
+        span = exporter.get_finished_spans()[-1]
+        assert span.attributes.get(attrs.GEN_AI_REQUEST_MODEL) == "gemini-2.0-flash"
+
+
+class TestBug5_DoubleExceptionEvents:
+    """Error spans should have exactly 1 exception event, not 2."""
+
+    def test_observe_error_single_exception_event(self, setup_tracer):
+        exporter = setup_tracer
+
+        @observe()
+        def fail():
+            raise ValueError("boom")
+
+        with pytest.raises(ValueError):
+            fail()
+
+        span = exporter.get_finished_spans()[0]
+        exception_events = [e for e in span.events if e.name == "exception"]
+        assert len(exception_events) == 1, f"Expected 1 exception event, got {len(exception_events)}"
+
+    def test_trace_tool_error_single_exception_event(self, setup_tracer):
+        exporter = setup_tracer
+
+        @trace_tool(tool_name="bad_tool")
+        def fail():
+            raise RuntimeError("tool error")
+
+        with pytest.raises(RuntimeError):
+            fail()
+
+        span = exporter.get_finished_spans()[0]
+        exception_events = [e for e in span.events if e.name == "exception"]
+        assert len(exception_events) == 1
+
+    def test_trace_llm_error_single_exception_event(self, setup_tracer):
+        exporter = setup_tracer
+
+        @trace_llm(model="gpt-4o")
+        def fail():
+            raise RuntimeError("llm error")
+
+        with pytest.raises(RuntimeError):
+            fail()
+
+        span = exporter.get_finished_spans()[0]
+        exception_events = [e for e in span.events if e.name == "exception"]
+        assert len(exception_events) == 1
+
+
+class TestBug7_DoubleInit:
+    """init() called twice should not silently create split-brain state."""
+
+    def test_init_twice_raises_or_warns(self, setup_tracer):
+        from agentrace.config import _config, init, get_config
+
+        # First init
+        exporter1 = InMemorySpanExporter()
+        p1 = TracerProvider()
+        p1.add_span_processor(SimpleSpanProcessor(exporter1))
+        init(service_name="first", provider=p1)
+        assert get_config().initialized is True
+
+        # Second init should raise RuntimeError
+        exporter2 = InMemorySpanExporter()
+        p2 = TracerProvider()
+        p2.add_span_processor(SimpleSpanProcessor(exporter2))
+        with pytest.raises(RuntimeError):
+            init(service_name="second", provider=p2)
+
+        p1.shutdown()
+        p2.shutdown()
+
+
+class TestBug8_TraceToolMissingReattachContext:
+    """set_user() inside @trace_tool should appear on tool span."""
+
+    def test_set_user_inside_trace_tool(self, setup_tracer):
+        exporter = setup_tracer
+
+        @trace_tool(tool_name="my_tool")
+        def tool_fn():
+            set_user("tool-user-999")
+            return "done"
+
+        tool_fn()
+        span = exporter.get_finished_spans()[0]
+        assert span.attributes.get(attrs.AGENTRACE_USER_ID) == "tool-user-999"
+
+
+class TestBug9_ChainRetrievalNameAlias:
+    """trace_chain and trace_retrieval should accept name aliases like trace_tool."""
+
+    def test_trace_chain_accepts_chain_name_kwarg(self, setup_tracer):
+        # Should not raise TypeError
+        @trace_chain(name="my-chain")
+        def chain_fn():
+            return "ok"
+        chain_fn()
+
+    def test_trace_retrieval_accepts_retrieval_name_kwarg(self, setup_tracer):
+        @trace_retrieval(name="my-retrieval")
+        def retrieval_fn():
+            return ["doc1"]
+        retrieval_fn()
+
+
+class TestBug10_RetrievalSpecificAttributes:
+    """@trace_retrieval should set agentrace.retrieval.query and num_documents."""
+
+    def test_trace_retrieval_sets_query_attr(self, setup_tracer):
+        exporter = setup_tracer
+
+        @trace_retrieval(name="search")
+        def search(query, top_k=5):
+            return ["doc1", "doc2", "doc3"]
+
+        search("what is otel?")
+        span = exporter.get_finished_spans()[0]
+        assert span.attributes.get(attrs.AGENTRACE_RETRIEVAL_QUERY) == "what is otel?"
+
+    def test_trace_retrieval_sets_num_docs(self, setup_tracer):
+        exporter = setup_tracer
+
+        @trace_retrieval(name="search")
+        def search(query):
+            return ["doc1", "doc2"]
+
+        search("test")
+        span = exporter.get_finished_spans()[0]
+        assert span.attributes.get(attrs.AGENTRACE_RETRIEVAL_NUM_DOCS) == 2
+
+
+class TestBug11_SessionContextReset:
+    """session_context should correctly reset both session and user on exit."""
+
+    def test_session_context_resets_both_vars(self, setup_tracer):
+        from agentrace.session import get_session, get_user
+
+        # Set initial values
+        set_session("outer-session")
+        set_user("outer-user")
+
+        with session_context(session_id="inner-session", user_id="inner-user"):
+            assert get_session() == "inner-session"
+            assert get_user() == "inner-user"
+
+        # After exit, previous values should be restored
+        assert get_session() == "outer-session"
+        assert get_user() == "outer-user"
+
+    def test_session_context_resets_session_only(self, setup_tracer):
+        from agentrace.session import get_session, get_user
+
+        set_session("original")
+        set_user("keep-this")
+
+        with session_context(session_id="temp"):
+            assert get_session() == "temp"
+
+        assert get_session() == "original"
+        assert get_user() == "keep-this"
+
+    def test_session_context_resets_user_only(self, setup_tracer):
+        from agentrace.session import get_session, get_user
+
+        set_session("keep-this")
+        set_user("original")
+
+        with session_context(user_id="temp"):
+            assert get_user() == "temp"
+
+        assert get_user() == "original"
+        assert get_session() == "keep-this"

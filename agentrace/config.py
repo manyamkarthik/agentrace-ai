@@ -66,6 +66,12 @@ def init(
     """
     global _config
 
+    if _config.initialized:
+        raise RuntimeError(
+            "agentrace.init() has already been called. "
+            "Call agentrace.shutdown() first if you need to reinitialize."
+        )
+
     if provider is not None:
         # User brought their own provider — just use it
         trace.set_tracer_provider(provider)
@@ -136,6 +142,8 @@ def _resolve_exporter(
 
 def shutdown() -> None:
     """Flush and shut down the tracer provider."""
+    global _config
     provider = trace.get_tracer_provider()
     if hasattr(provider, "shutdown"):
         provider.shutdown()
+    _config = _Config()

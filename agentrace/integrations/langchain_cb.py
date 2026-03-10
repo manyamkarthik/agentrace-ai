@@ -61,18 +61,32 @@ class AgentraceCallbackHandler(BaseCallbackHandler):  # type: ignore[misc]
     ) -> None:
         name = _safe_name(serialized, "id", "llm")
         span = self._start_span(run_id, f"langchain.llm.{name}", "llm")
-        model = kwargs.get("invocation_params", {}).get("model_name", "")
+        ip = kwargs.get("invocation_params", {})
+        model = ip.get("model_name") or ip.get("model", "")
         if model:
             span.set_attribute(attrs.GEN_AI_REQUEST_MODEL, model)
         span.set_attribute(attrs.AGENTRACE_PROMPT, safe_serialize(prompts))
 
     def on_llm_end(self, response: Any, *, run_id: UUID, **kwargs: Any) -> None:
         span = self._spans.get(run_id)
-        if span and hasattr(response, "llm_output") and response.llm_output:
-            usage = response.llm_output.get("token_usage", {})
-            if usage:
-                span.set_attribute(attrs.GEN_AI_USAGE_INPUT_TOKENS, usage.get("prompt_tokens", 0))
-                span.set_attribute(attrs.GEN_AI_USAGE_OUTPUT_TOKENS, usage.get("completion_tokens", 0))
+        if span:
+            # Extract completion text from generations
+            if hasattr(response, "generations") and response.generations:
+                try:
+                    text = response.generations[0][0].text
+                    if text:
+                        span.set_attribute(attrs.AGENTRACE_COMPLETION, safe_serialize(text))
+                except (IndexError, AttributeError):
+                    pass
+
+            # Extract token usage — support both OpenAI and Gemini key formats
+            if hasattr(response, "llm_output") and response.llm_output:
+                usage = response.llm_output.get("token_usage") or response.llm_output.get("usage_metadata", {})
+                if usage:
+                    input_t = usage.get("prompt_tokens") or usage.get("input_tokens", 0)
+                    output_t = usage.get("completion_tokens") or usage.get("output_tokens", 0)
+                    span.set_attribute(attrs.GEN_AI_USAGE_INPUT_TOKENS, input_t)
+                    span.set_attribute(attrs.GEN_AI_USAGE_OUTPUT_TOKENS, output_t)
         self._end_span(run_id)
 
     def on_llm_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
